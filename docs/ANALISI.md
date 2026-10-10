@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Versione | 0.1 (bozza di analisi) |
+| Versione | 0.2 (bozza di analisi: motore ibrido TWA + WebView) |
 | Data | 10 ottobre 2026 |
 | Stato | Da validare prima dell'avvio dello sviluppo |
 
@@ -78,42 +78,104 @@ Le PWA sono app a tutti gli effetti, ma restano difficili da trovare e da instal
 
 ## 3. Il nodo tecnico: come si "installa" una PWA da un'app di terzi
 
-È la decisione più importante del progetto, perché Android non permette a un'app di installare *in silenzio* la PWA di un altro sito. Esistono quattro strategie, con pregi e limiti diversi. Il progetto le adotta **a livelli**.
+È la decisione più importante del progetto, perché Android non permette a un'app di installare *in silenzio* la PWA di un altro sito.
+
+> **Decisione presa:** PWApp apre ogni PWA con un **motore ibrido**.
+> - Se il sito ha autorizzato PWApp nel proprio `assetlinks.json`, si usa la **TWA** (Chrome): schermo intero, notifiche push, login condivisi con il browser.
+> - Se il sito non l'ha fatto, si usa una **WebView a schermo intero** dentro PWApp, come fanno Brave e Firefox con le loro "app installate".
+>
+> Agli sviluppatori **chiediamo attivamente** di aggiungere PWApp al loro `assetlinks.json` (programma "PWA verificata", §3.6).
 
 ### 3.1 Cosa serve sapere sulla TWA
 
 Una **Trusted Web Activity** (TWA, libreria `androidx.browser`) apre un sito dentro un'app Android usando il motore del browser installato (Chrome, Edge, Samsung Internet…). Si ottengono così service worker, notifiche push, pagamenti e cookie condivisi con il browser, senza le limitazioni di una WebView.
 
-La condizione per avere lo **schermo intero senza barra dell'indirizzo** è che il sito dichiari di fidarsi dell'app tramite **Digital Asset Links**: il file `https://<dominio>/.well-known/assetlinks.json` deve contenere il nome del pacchetto e l'impronta SHA-256 del certificato di firma dell'app.
+La condizione per avere lo **schermo intero senza barra dell'indirizzo** è che il sito dichiari di fidarsi dell'app tramite **Digital Asset Links**: il file `https://<dominio>/.well-known/assetlinks.json` deve contenere il nome del pacchetto e l'impronta SHA-256 del certificato di firma dell'app:
 
-Conseguenza: **per le PWA di terzi PWApp non può avere questo file**, a meno che sia il proprietario del sito ad aggiungerlo. Senza verifica la TWA funziona lo stesso ma ripiega in modalità *Custom Tab*, cioè con una barra in alto che mostra dominio e titolo.
+```json
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "app.pwapp",
+    "sha256_cert_fingerprints": ["AB:CD:12:...:EF"]
+  }
+}]
+```
 
-Un dettaglio utile: una sola app TWA può essere verificata su **più origini**. Se tanti sviluppatori aggiungono l'impronta di PWApp al proprio `assetlinks.json`, le loro PWA si aprono a schermo intero dentro il launcher di PWApp.
+Il file **non serve per installare**: serve solo a togliere la barra in modalità TWA. È una protezione di sicurezza, perché impedisce a un'app qualsiasi di mostrare il sito di una banca a schermo intero spacciandosi per l'app ufficiale.
 
-### 3.2 Le quattro strategie
+Senza il file, la TWA funziona lo stesso ma ripiega in modalità *Custom Tab*, cioè con una barra in alto che mostra dominio e titolo. Per questo, quando il file manca, PWApp **non usa la TWA ma la WebView** (§3.4).
 
-| Livello | Strategia | Come funziona | Pro | Contro |
-|---|---|---|---|---|
-| **A** | **Collegamento + launcher TWA** (predefinito) | `ShortcutManager.requestPinShortcut()` crea un'icona sulla home con l'icona della PWA. L'icona apre una `LauncherActivity` di PWApp che lancia la TWA sull'URL, in un task separato per ogni app | Funziona con qualsiasi URL; un tocco; nessun permesso speciale; compatibile con il Play Store | Senza verifica compare la barra del dominio; l'icona mostra il piccolo badge dell'app PWApp (limite di Android per i collegamenti fissati) |
-| **B** | **TWA verificata** | Il proprietario rivendica la PWA e aggiunge l'impronta di PWApp al suo `assetlinks.json`. Il backend controlla il file e segna la scheda come "Fullscreen" | Schermo intero vero, esperienza nativa | Serve la collaborazione dello sviluppatore |
-| **C** | **Installazione nativa del browser (WebAPK)** | PWApp apre l'URL in Chrome tramite intent, e l'utente conferma "Installa app". Chrome genera un **WebAPK** firmato da Google | Si ottiene un'app vera nel cassetto, con notifiche e senza badge | Non si può automatizzare: l'utente deve confermare nel browser; dipende da Chrome; il flusso esce dall'app |
-| **D** | **APK personalizzato generato dal server (Bubblewrap, §3.5)** | Un worker Docker usa **Bubblewrap** (lo strumento di Google per creare TWA) e produce un APK/AAB dedicato con nome pacchetto, icona e colori della PWA | App indipendente a tutti gli effetti; lo sviluppatore può pubblicarla sul Play Store | Lo schermo intero richiede comunque `assetlinks.json`; installare APK esterni richiede `REQUEST_INSTALL_PACKAGES`, molto limitato su Google Play; dal 2026 Google richiede la verifica dello sviluppatore anche per gli APK fuori Play |
+Una sola app TWA può essere verificata su **più origini**: ogni sviluppatore aggiunge la stessa voce (pacchetto `app.pwapp` e impronta di PWApp) e la sua PWA si apre a schermo intero nel launcher di PWApp.
 
-### 3.3 Raccomandazione
+### 3.2 Collegamento, WebAPK e APK: cosa ottiene l'utente
 
-- **MVP: livello A + livello C.** Il pulsante "Installa" crea il collegamento TWA (A). Un pulsante secondario "Installa con il browser" apre Chrome per il WebAPK (C), consigliato quando la PWA usa le notifiche.
-- **Fase 2: livello B.** Si aggiunge il programma "Verificata" per gli sviluppatori, con una procedura guidata che genera il frammento `assetlinks.json` da copiare.
-- **Fase 3: livello D con Bubblewrap**, principalmente per i proprietari verificati (build personali per utenti come funzione sperimentale, §3.5): il servizio di build consegna l'AAB/APK allo sviluppatore, che lo pubblica a suo nome. **Non** distribuiamo APK di siti altrui dentro la versione Play di PWApp.
+| | Collegamento PWApp (come Brave) | WebAPK di Chrome | APK generato (Bubblewrap) |
+|---|---|---|---|
+| Icona sulla home | ✅ | ✅ | ✅ |
+| Nel cassetto delle app / in Impostazioni → App | ❌ | ✅ | ✅ |
+| Badge sull'icona | Piccolo logo PWApp (dipende dal launcher) | Nessuno | Nessuno |
+| Schermo intero su qualsiasi sito | ✅ (TWA se verificata, altrimenti WebView) | ✅ | ✅ (TWA se verificata, altrimenti WebView) |
+| Notifiche push del sito | Solo con TWA | ✅ | Solo con TWA |
+| Installazione con un tocco | ✅ | ✅ (conferma in Chrome) | ❌ (sorgenti sconosciute + avvisi) |
+| Ammesso nella versione Play di PWApp | ✅ | ✅ | ❌ |
 
-**Ripiego WebView (facoltativo).** Se sul dispositivo non c'è un browser compatibile con TWA, si può aprire la PWA in una WebView a schermo intero. Le funzioni sono ridotte (niente push web, storage separato), quindi questa modalità va segnalata chiaramente all'utente.
+Solo Chrome e Samsung Internet possono generare un **WebAPK** in automatico (server di firma proprietari e installazione privilegiata). Un'altra app può ottenere una "vera app" solo generando e facendo installare un APK, con gli avvisi di sicurezza di Android.
 
-### 3.4 Dettagli del launcher (livello A)
+### 3.3 Le strategie adottate
 
-- Si usa **una sola** `LauncherActivity` con `documentLaunchMode="intoExisting"`, oppure intent con `FLAG_ACTIVITY_NEW_DOCUMENT` e un URI diverso per ogni app. In questo modo ogni PWA appare come una scheda separata nelle app recenti, con il suo nome e il suo colore (`ActivityManager.TaskDescription`).
-- La splash screen usa `background_color` e l'icona del manifest. Per i parametri della barra di stato si usa `theme_color`.
-- `display: standalone | fullscreen | minimal-ui` viene rispettato tramite `TrustedWebActivityIntentBuilder` (`setDisplayMode`, `setScreenOrientation`).
+| Livello | Strategia | Quando |
+|---|---|---|
+| **A** | **Collegamento + launcher ibrido** (predefinito): `ShortcutManager.requestPinShortcut()` crea l'icona; l'icona apre la `LauncherActivity` di PWApp, che sceglie il motore (TWA se verificata, WebView altrimenti) | MVP |
+| **B** | **PWA verificata**: il sito aggiunge PWApp al proprio `assetlinks.json`; il backend lo rileva e la scheda passa alla TWA a schermo intero, con badge "Verificata" | Rilevamento automatico nell'MVP, programma completo in Fase 2 |
+| **C** | **"Installa con Chrome"**: PWApp apre l'URL in Chrome e l'utente conferma "Installa app"; Chrome genera il WebAPK | MVP, consigliato per le PWA che usano notifiche push o "Accedi con Google" |
+| **D** | **APK generato con Bubblewrap** (§3.5): app indipendente, senza badge | Fase 3, solo fuori da Google Play o come strumento per gli sviluppatori |
+
+**Logica di scelta del motore** (eseguita all'apertura e aggiornata dal backend):
+
+```
+se il dispositivo ha un browser che supporta TWA
+   e l'origine è verificata (assetlinks contiene app.pwapp + nostra impronta)
+      → TWA
+altrimenti
+      → WebView a schermo intero
+```
+
+L'app ricontrolla la verifica anche sul dispositivo (`CustomTabsSession.validateRelationship`), perché il file può cambiare tra un controllo del backend e l'altro. L'utente può forzare il motore per ogni app (TWA con barra, WebView, apri nel browser) dalle impostazioni della singola app.
+
+**Motore sostituibile.** Il motore è isolato dietro un'interfaccia (`WebEngine`): se i test mostrano che la WebView non basta per troppe PWA, la si può sostituire con **GeckoView** (il motore di Firefox, distribuito da Mozilla come libreria) senza toccare il resto dell'app. Un fork di Chromium è stato valutato e scartato: costi di manutenzione e di sicurezza troppo alti per un team piccolo.
+
+### 3.4 Il launcher ibrido (livello A)
+
+**Comune a entrambi i motori**
+
+- Si usa **una sola** `LauncherActivity` con `documentLaunchMode="intoExisting"`, oppure intent con `FLAG_ACTIVITY_NEW_DOCUMENT` e un URI diverso per ogni app. Ogni PWA appare come una scheda separata nelle app recenti, con il suo nome e il suo colore (`ActivityManager.TaskDescription`).
+- La splash screen usa `background_color` e l'icona del manifest; `theme_color` colora le barre di sistema.
+- Si rispettano `display` (`standalone`, `fullscreen`, `minimal-ui`) e `orientation` del manifest.
 - Le icone sono generate localmente in formato **adaptive** (sfondo pieno + primo piano con margine di sicurezza). Si preferisce l'icona `purpose: maskable` quando esiste.
-- Per i dispositivi senza supporto ai collegamenti fissati (rari, alcuni launcher) si ripiega su un widget o sull'apertura dall'interno di PWApp.
+- Per i launcher che non supportano i collegamenti fissati (rari) si ripiega su un widget o sull'apertura dall'interno di PWApp.
+
+**Motore TWA (siti verificati)**
+
+- `TrustedWebActivityIntentBuilder` con `setDisplayMode`, `setScreenOrientation`, colori e splash.
+- Notifiche push delegate a Chrome e mostrate con il nome della PWA (*notification delegation*).
+- Login e cookie condivisi con il browser.
+
+**Motore WebView (tutti gli altri siti)**
+
+- `WebView` a schermo intero, edge-to-edge, con `androidx.webkit` per le funzioni più recenti.
+- Attivi JavaScript, DOM storage, IndexedDB e **service worker** (`ServiceWorkerControllerCompat`), quindi funzionano cache e modalità offline.
+- **Un profilo separato per ogni PWA** (Multi-Profile di `androidx.webkit`, dove supportato): cookie e dati di un sito non si mescolano con quelli degli altri, e si possono cancellare app per app.
+- Navigazione limitata allo `scope` del manifest; i link esterni si aprono nel browser predefinito (`shouldOverrideUrlLoading`).
+- Gestione completa di: caricamento file (`onShowFileChooser`), permessi (fotocamera, microfono, posizione) con le richieste di sistema Android, download tramite `DownloadManager`, video a schermo intero (`onShowCustomView`), tema scuro, tasto indietro (cronologia della WebView, poi chiusura), trascina per aggiornare facoltativo.
+- Sicurezza: nessun `addJavascriptInterface`, accesso a `file://` e `content://` disattivato, Safe Browsing della WebView attivo, solo HTTPS.
+- **Limiti noti, mostrati all'utente nella scheda dell'app:**
+  - niente **notifiche push** web (la WebView non le supporta);
+  - **login separato** da quello di Chrome;
+  - i flussi **"Accedi con Google"** sono bloccati da Google nelle WebView (errore `disallowed_useragent`).
+
+  Per le PWA dove questi limiti pesano (rilevati dal worker o segnalati dagli utenti) la scheda propone in primo piano **"Installa con Chrome"** (livello C).
 
 ### 3.5 Bubblewrap in dettaglio (livello D)
 
@@ -135,12 +197,34 @@ richiesta build ─▶ coda "builds" ─▶ container apk-builder
 - **Package name** deterministico: `app.pwapp.u.<slug>` per le build personali, e quello scelto dallo sviluppatore per le build dei proprietari.
 - **Firma**:
   - *Build del proprietario*: lo sviluppatore carica la propria keystore (cifrata a riposo, usata solo nel container e poi rimossa), oppure scarica l'AAB non firmato e lo firma con Play App Signing. Riceve inoltre il frammento `assetlinks.json` già pronto con l'impronta corretta, così l'app è a **schermo intero vero**.
-  - *Build personale per un utente*: firmata con una chiave PWApp dedicata (separata da quella dell'app principale). Senza `assetlinks.json` sul sito l'APK si apre con la barra del dominio, come il livello A: il vantaggio è avere un'**app indipendente** nel cassetto, con nome e icona propri, senza badge e senza dipendere da PWApp.
+  - *Build personale per un utente*: firmata con una chiave PWApp dedicata (separata da quella dell'app principale). Usa il **modello WebView** (sotto), quindi è a schermo intero anche senza `assetlinks.json`: l'utente ottiene un'**app indipendente** nel cassetto, con nome e icona propri, senza badge e senza dipendere da PWApp.
+- **Due modelli di progetto**:
+  - **Modello TWA** (quello standard di Bubblewrap): per le build dei proprietari e per i siti che hanno autorizzato il pacchetto specifico nel proprio `assetlinks.json`. Ogni APK ha un nome di pacchetto diverso, quindi serve una voce per ciascuno.
+  - **Modello WebView** (nostro, generato dallo stesso servizio con un template Gradle dedicato che riusa il motore WebView del launcher, §3.4): per le build personali di siti non verificati. Ha gli stessi limiti della WebView: niente push, login separato.
+  - L'opzione `fallbackType: webview` di Bubblewrap **non** basta: interviene solo quando sul dispositivo manca un browser compatibile con TWA, non quando manca la verifica del sito.
 - **Distribuzione**: download dalla web app o dal profilo utente. Su Android l'installazione richiede che l'utente abiliti "Installa app sconosciute" per il browser o il file manager: l'app Play di PWApp **non** chiama l'installer, e il permesso `REQUEST_INSTALL_PACKAGES` resta solo nel flavor distribuito fuori Play (§14).
 - **Aggiornamenti**: quando cambia il manifest (ricontrollo periodico §6), il backend può proporre una nuova build con `versionCode` incrementato. Le build personali firmate dalla stessa chiave si aggiornano sopra la versione installata.
 - **Rischi specifici**: tempi e costi di CPU (servono quote per utente, ad esempio 3 build al giorno); verifica sviluppatori Android dal 2026, per cui gli APK firmati da PWApp per siti di terzi possono essere bloccati sui dispositivi certificati nei paesi dove la regola è attiva. Per questo le build personali sono classificate come **funzione sperimentale**, mentre le build per i proprietari sono il caso d'uso principale.
 
 **Uso di Bubblewrap anche per l'app PWApp stessa (opzionale).** Il catalogo web è una PWA (§9.4), quindi Bubblewrap può impacchettarlo in pochi minuti come TWA verificata. Può servire come **prototipo rapido** da mettere sul Play Store prima che l'app nativa Compose sia pronta. Va però considerato un ponte: le funzioni chiave (collegamenti fissati, share target nativo, Credential Manager, launcher multi-task) richiedono codice nativo.
+
+
+### 3.6 Programma "PWA verificata" (assetlinks.json)
+
+Obiettivo: far sì che il maggior numero possibile di PWA del catalogo passi dalla WebView alla TWA a schermo intero.
+
+- **Rilevamento automatico** (già nell'MVP): a ogni analisi e ricontrollo (§6) il worker scarica `https://<origine>/.well-known/assetlinks.json` e controlla se contiene il pacchetto `app.pwapp` con l'impronta della nostra chiave di firma. Se sì, la scheda diventa `twa_verified = true` e l'app passa alla TWA alla prossima apertura, **anche se il proprietario non si è mai registrato**.
+- **Pagina "Per sviluppatori"** bilingue sul sito, con:
+  - spiegazione semplice dei vantaggi (schermo intero, push, badge "Verificata", posizione migliore nei risultati);
+  - il **frammento JSON pronto da copiare**, già compilato con pacchetto e impronta;
+  - istruzioni per i casi più comuni: file già esistente da integrare (si aggiunge un elemento all'array), hosting statico (Netlify, Vercel, GitHub Pages, Cloudflare Pages), server Nginx/Apache, framework (Next.js, SvelteKit, Angular, WordPress);
+  - pulsante **"Verifica ora"** che lancia il controllo e mostra l'esito, con gli errori più comuni spiegati (file non trovato, `Content-Type` diverso da `application/json`, redirect, impronta sbagliata, JSON non valido).
+- **Richiesta attiva**:
+  - nella scheda di ogni app non verificata, un pulsante **"Sei lo sviluppatore?"** porta alla procedura;
+  - quando un'app raggiunge una certa popolarità, PWApp può contattare lo sviluppatore tramite i canali pubblici indicati nel sito o nel manifest (email di contatto, repository), con un messaggio breve e senza insistere;
+  - gli utenti possono "chiedere la verifica" con un tocco; il contatore di richieste rende la proposta più convincente per lo sviluppatore.
+- **Vantaggi per chi aderisce**: badge "Verificata", modifica della scheda, statistiche di installazione, accesso alle build Bubblewrap (§3.5) e, in futuro, notifiche agli utenti quando esce una nuova versione.
+- **Rischio da gestire**: se cambiamo la chiave di firma dell'app, tutte le verifiche si perdono. La chiave va custodita con cura (Play App Signing + backup) e la pagina sviluppatori può indicare in anticipo anche l'impronta di una chiave di riserva, accettata insieme a quella principale.
 
 ---
 
@@ -320,7 +404,7 @@ Per un'esperienza "magica" durante l'invio, l'endpoint `POST /v1/submissions/pre
 | Immagini | Coil 3 (KMP) |
 | Navigazione | Navigation Compose con route type-safe |
 | Background | WorkManager (sync libreria, aggiornamento icone dei collegamenti) |
-| TWA | `androidx.browser` (TrustedWebActivityIntentBuilder, CustomTabsClient) |
+| Motori web | `androidx.browser` per la TWA (TrustedWebActivityIntentBuilder, CustomTabsClient); `WebView` + `androidx.webkit` per i siti non verificati; interfaccia `WebEngine` per poter passare a GeckoView |
 | Auth | **Credential Manager** (passkey, Sign in with Google, password salvate) |
 | Notifiche | FCM opzionale (es. "una tua proposta è stata approvata") |
 | Qualità | Detekt, ktlint, test con Turbine, screenshot test con Roborazzi/Paparazzi, Baseline Profiles |
@@ -335,14 +419,14 @@ Per un'esperienza "magica" durante l'invio, l'endpoint `POST /v1/submissions/pre
 4. **Dettaglio app**: header con colore estratto dall'icona, screenshot in galleria, punteggio qualità, recensioni, pulsante "Installa" con morph animato (Installa → progresso → Apri).
 5. **Aggiungi**: campo URL con incolla dagli appunti e ricezione da "Condividi" (`ACTION_SEND` da qualsiasi browser). Anteprima live, poi due scelte: "Installa solo per me" (URL libero) e "Proponi al catalogo".
 6. **Le mie app**: le PWA installate, con riordino, modifica icona e nome, rimozione del collegamento.
-7. **Profilo**: proposte inviate e loro stato, recensioni, collezioni, preferenze (lingua, tema, modalità di apertura preferita: TWA o browser).
+7. **Profilo**: proposte inviate e loro stato, recensioni, collezioni, preferenze (lingua, tema, motore di apertura predefinito: automatico, WebView o browser).
 8. **Area sviluppatore** (Fase 2): rivendicazione, istruzioni `assetlinks.json`, statistiche.
 
 ### 7.3 Intent e integrazioni
 
 - **Share target**: PWApp compare nel menu "Condividi" di Chrome/Firefox → "Crea app da questa pagina".
 - **Deep link** verificati (`https://pwapp.example/app/{slug}`) per aprire le schede dal web.
-- **Link interni della PWA**: la TWA gestisce la navigazione nello `scope`; i link esterni si aprono nel browser.
+- **Link interni della PWA**: TWA e WebView restano nello `scope` del manifest; i link esterni si aprono nel browser.
 - **Scorciatoie del manifest**: i `shortcuts` della PWA diventano shortcut dinamici del collegamento quando possibile.
 
 ---
@@ -432,7 +516,8 @@ apps(id, slug, origin, manifest_id, start_url, scope, manifest_url,
      icon_key, icon_maskable_key, blurhash,
      quality_score, has_service_worker, works_offline,
      status[draft|pending|published|hidden|rejected|broken],
-     verified_owner_id NULL, twa_verified bool,
+     verified_owner_id NULL, twa_verified bool, assetlinks_checked_at,
+     webview_issues jsonb,        -- push, login Google, ecc. → suggerisce "Installa con Chrome"
      submitted_by, created_at, updated_at, last_checked_at, check_failures)
 
 app_translations(app_id, locale, name, short_name, description, source[owner|manifest|user|machine])
@@ -470,7 +555,9 @@ REST JSON versionata (`/v1`), documentata con **OpenAPI 3.1**, da cui si generan
 | GET | `/v1/home` | Sezioni della home (in evidenza, nuove, trend, collezioni) |
 | GET | `/v1/apps?category=&sort=&cursor=` | Elenco |
 | GET | `/v1/apps/{slug}` | Dettaglio |
-| GET | `/v1/apps/{slug}/launch` | Parametri di lancio (URL, display, colori, `twa_verified`, icone) |
+| GET | `/v1/apps/{slug}/launch` | Parametri di lancio (URL, scope, display, colori, icone, `twa_verified`, motore consigliato, limiti noti in WebView) |
+| POST | `/v1/apps/{slug}/verify-assetlinks` | Ricontrolla subito l'`assetlinks.json` del sito (pulsante "Verifica ora") |
+| POST | `/v1/apps/{slug}/verification-requests` | Un utente chiede allo sviluppatore di verificare la PWA |
 | GET | `/v1/search?q=` | Ricerca |
 | GET | `/v1/categories` | Categorie |
 | POST | `/v1/submissions/preview` | Anteprima sincrona da URL (rate-limited, anche anonima) |
@@ -504,7 +591,7 @@ REST JSON versionata (`/v1`), documentata con **OpenAPI 3.1**, da cui si generan
 - Le immagini scaricate vengono **ricodificate** (sharp/libvips) prima di essere servite: niente SVG "attivi" serviti così come sono (si sanitizzano o si rasterizzano).
 - Rate limiting su Caddy e sull'API; header di sicurezza (CSP, HSTS).
 - Dipendenze controllate (Renovate + `npm audit`/OSV), immagini Docker scansionate (Trivy) in CI.
-- Lato Android: TWA sicura per costruzione (gira nel browser); per l'eventuale WebView di ripiego si disabilitano `file://` e il JS bridge.
+- Lato Android: la TWA è sicura per costruzione (gira nel browser); per la WebView valgono le regole del §3.4 (nessun JS bridge, niente `file://`, Safe Browsing attivo, profilo separato per ogni PWA).
 
 ---
 
@@ -516,7 +603,7 @@ REST JSON versionata (`/v1`), documentata con **OpenAPI 3.1**, da cui si generan
 | **Digital Services Act** | PWApp ospita contenuti generati dagli utenti: servono un meccanismo di segnalazione ("notice and action"), motivazione delle rimozioni, punto di contatto e termini chiari |
 | **Cookie / ePrivacy** | Sul web solo cookie tecnici di sessione; nessun tracciamento di terze parti, quindi niente banner invasivo |
 | **Marchi e icone** | Nomi e icone appartengono ai titolari delle PWA: vanno mostrati a scopo descrittivo, con procedura di rimozione su richiesta (stile DMCA/DSA) e possibilità di rivendicazione |
-| **Google Play – app WebView/wrapper** | PWApp è un catalogo/launcher, non il "wrapper" di un singolo sito altrui: va descritto con chiarezza la funzione di directory. Le TWA aprono contenuti nel browser e non nella nostra WebView |
+| **Google Play – app WebView/wrapper** | PWApp è un catalogo/launcher, non il "wrapper" di un singolo sito altrui: va descritto con chiarezza la funzione di directory. Poiché i siti non verificati si aprono nella nostra WebView, la scheda Play deve chiarire che sono siti di terzi aperti su richiesta dell'utente, mostrando sempre l'origine (es. nella schermata di caricamento e nel menu dell'app) |
 | **Google Play – `REQUEST_INSTALL_PACKAGES`** | Permesso consentito solo per casi d'uso specifici: **non** lo usiamo nella build Play. Il livello D (APK) si consegna ai proprietari, oppure si offre in un flavor separato distribuito fuori Play |
 | **Verifica sviluppatori Android (dal 2026)** | Google richiede che anche le app installate fuori dal Play Store provengano da sviluppatori verificati, con introduzione graduale per paese da settembre 2026. Per il livello D questo significa che l'APK va firmato e registrato dallo **sviluppatore della PWA**, non da PWApp |
 | **App Store (iOS)** | La regola 4.2 (funzionalità minima) e le linee guida sulle directory di app vanno valutate: l'app iOS deve offrire valore proprio (catalogo, collezioni, sincronizzazione), non solo link |
@@ -580,7 +667,7 @@ PWApp/
 ├── web/                # Catalogo web PWA (SvelteKit)
 ├── mobile/             # Progetto Gradle KMP
 │   ├── shared/         # modelli, API client, repository, ViewModel
-│   ├── androidApp/     # UI Compose, TWA launcher, installer Android
+│   ├── androidApp/     # UI Compose, launcher ibrido (TWA/WebView), installer Android
 │   ├── iosApp/         # (futuro)
 │   └── desktopApp/     # (futuro)
 ├── builder/            # (Fase 3) immagine Bubblewrap + Android SDK
@@ -601,9 +688,9 @@ CI/CD (GitHub Actions): test e lint per ogni modulo; build delle immagini Docker
 | Fase | Durata indicativa | Contenuto |
 |---|---|---|
 | **0 – Fondamenta** | 2 settimane | Monorepo, Docker Compose, CI, schema DB, OpenAPI iniziale, design system (token colori, tipografia, componenti base) in Figma e Compose |
-| **1 – MVP** | 8–10 settimane | Pipeline di acquisizione (§6), catalogo, ricerca, dettaglio, installazione livelli **A** e **C**, URL libero e share target, registrazione (passkey, Google, magic link), proposte con moderazione base, IT/EN completo, animazioni principali. Rilascio in beta chiusa su Play |
-| **2 – Comunità e sviluppatori** | 6 settimane | Recensioni, preferiti, collezioni, sincronizzazione della libreria, rivendicazione dominio, **TWA verificata (livello B)**, statistiche per sviluppatori, catalogo web pubblico SEO, ricontrolli periodici |
-| **3 – Build e qualità** | 4–6 settimane | Servizio di build APK/AAB con Bubblewrap (**livello D**) per i proprietari, traduzione automatica, osservabilità completa, hardening |
+| **1 – MVP** | 8–10 settimane | Pipeline di acquisizione (§6), catalogo, ricerca, dettaglio, launcher ibrido TWA/WebView (livello **A**), rilevamento automatico di `assetlinks.json` (livello **B**), "Installa con Chrome" (livello **C**), URL libero e share target, registrazione (passkey, Google, magic link), proposte con moderazione base, IT/EN completo, animazioni principali. Rilascio in beta chiusa su Play |
+| **2 – Comunità e sviluppatori** | 6 settimane | Recensioni, preferiti, collezioni, sincronizzazione della libreria, rivendicazione dominio, **programma "PWA verificata" completo** (§3.6: pagina sviluppatori, "Verifica ora", richieste degli utenti), statistiche per sviluppatori, catalogo web pubblico SEO, ricontrolli periodici |
+| **3 – Build e qualità** | 4–6 settimane | Servizio di build APK/AAB con Bubblewrap (**livello D**): modello TWA per i proprietari, modello WebView per le build personali fuori Play; valutazione di GeckoView se la WebView si è rivelata limitante; traduzione automatica, osservabilità completa, hardening |
 | **4 – Desktop** | 6 settimane | App Compose Desktop con installer Linux (.desktop / Flatpak), Windows e macOS |
 | **5 – iOS** | 6–8 settimane | App iOS con UI condivisa, guida "Aggiungi a Home" e profili Web Clip, Sign in with Apple |
 
@@ -613,7 +700,9 @@ CI/CD (GitHub Actions): test e lint per ogni modulo; build delle immagini Docker
 
 | Rischio | Impatto | Mitigazione |
 |---|---|---|
-| La TWA non verificata mostra la barra del dominio e l'utente la percepisce come "non nativa" | Medio | Comunicarlo in modo chiaro; offrire WebAPK (C); spingere il programma "Verificata" (B); badge "Fullscreen" nelle schede |
+| Pochi siti aggiungono PWApp al loro `assetlinks.json` | Medio | La WebView garantisce comunque lo schermo intero; programma "PWA verificata" con vantaggi concreti e frammento pronto da copiare (§3.6) |
+| Limiti della WebView (niente push, login separato, "Accedi con Google" bloccato) | Medio | Avvisi nella scheda dell'app; "Installa con Chrome" in primo piano per le app colpite; motore sostituibile con GeckoView |
+| Cambio della chiave di firma dell'app | Alto | Invalida tutte le verifiche: Play App Signing, backup sicuro, impronta di riserva pubblicata in anticipo |
 | Badge dell'app PWApp sulle icone fissate | Basso | Limite di Android; per chi lo vuole evitare, consigliare il WebAPK |
 | Rifiuto o sospensione su Google Play (policy wrapper / install packages) | Alto | Niente `REQUEST_INSTALL_PACKAGES` nella build Play; scheda dello store che descrive il catalogo; valore proprio (ricerca, recensioni, sincronizzazione) |
 | Spam e phishing nel catalogo | Alto | Controlli automatici, reputazione, moderazione, Safe Browsing, segnalazioni |
